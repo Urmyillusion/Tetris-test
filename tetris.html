@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>俄罗斯方块</title>
+<style>
+  body {
+    margin: 0; min-height: 100vh;
+    background: #16162a; color: #eee;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    display: flex; justify-content: center; align-items: center;
+  }
+  .wrap { display: flex; gap: 24px; padding: 20px; }
+  #game { background: #0d0d1c; border: 2px solid #3a3a5a; border-radius: 6px; }
+  .panel { width: 220px; display: flex; flex-direction: column; gap: 12px; }
+  .panel h1 { font-size: 22px; text-align: center; margin: 0; color: #ffd166; }
+  .box { background: #22223c; border: 1px solid #3a3a5a; border-radius: 6px; padding: 10px 12px; }
+  .box h3 { margin: 0 0 6px; font-size: 13px; color: #8a8aa8; font-weight: normal; }
+  .val { font-size: 22px; font-weight: bold; color: #ffd166; }
+  #next { background: #0d0d1c; display: block; margin: 0 auto; border-radius: 4px; }
+  table.keys { font-size: 12px; color: #b8b8cc; border-collapse: collapse; width: 100%; }
+  table.keys td { padding: 3px 0; }
+  table.keys td:first-child { color: #ffd166; width: 66px; }
+  #btn-restart {
+    padding: 10px; border: none; border-radius: 6px; cursor: pointer;
+    background: #ffd166; color: #22223c; font-size: 15px; font-weight: bold;
+    font-family: inherit;
+  }
+  #btn-restart:hover { background: #ffe093; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- 主游戏区：10 列 × 20 行，每格 30px -->
+  <canvas id="game" width="300" height="600"></canvas>
+  <div class="panel">
+    <h1>俄罗斯方块</h1>
+    <div class="box"><h3>下一个</h3><canvas id="next" width="100" height="100"></canvas></div>
+    <div class="box"><h3>分数</h3><div class="val" id="score">0</div></div>
+    <div class="box"><h3>等级 / 消行</h3>
+      <div class="val"><span id="level">1</span> 级 / <span id="lines">0</span> 行</div>
+    </div>
+    <div class="box"><h3>键位说明</h3>
+      <table class="keys">
+        <tr><td>← / →</td><td>左右移动</td></tr>
+        <tr><td>↑</td><td>旋转</td></tr>
+        <tr><td>↓</td><td>软降（加速下落）</td></tr>
+        <tr><td>空格</td><td>硬降（直接落底）</td></tr>
+        <tr><td>P</td><td>暂停 / 继续</td></tr>
+        <tr><td>R</td><td>重新开始</td></tr>
+      </table>
+    </div>
+    <button id="btn-restart">重新开始</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ==================== 常量配置 ==================== */
+const COLS = 10, ROWS = 20, CELL = 30;          // 棋盘 10×20，格宽 30px
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+const nctx   = document.getElementById('next').getContext('2d');
+const NCELL  = 22;                               // 预览区格宽
+
+// 七种方块（矩阵表示，1 表示方块格），顺序：I O T S Z J L
+const SHAPES = [
+  [[1,1,1,1]],                    // I
+  [[1,1],[1,1]],                  // O
+  [[0,1,0],[1,1,1]],              // T
+  [[0,1,1],[1,1,0]],              // S
+  [[1,1,0],[0,1,1]],              // Z
+  [[1,0,0],[1,1,1]],              // J
+  [[0,0,1],[1,1,1]],              // L
+];
+const COLORS = ['#00e5ff','#ffd500','#b04ff0','#37e05a','#f04040','#3d6df0','#f09a2e'];
+const LINE_SCORES = [0, 100, 300, 500, 800];     // 一次消 1~4 行的基础分
+
+/* ==================== 游戏状态 ==================== */
+let board, cur, nextT;                           // 棋盘、当前方块、下一个方块类型
+let score = 0, lines = 0, level = 1;
+let state = 'playing';                           // playing | paused | over
+let bag = [];                                    // 7-bag 随机袋
+let dropCounter = 0, lastTime = 0;
+
+/* ==================== 方块生成（7-bag 随机） ==================== */
+// 每轮把 7 种方块洗牌后依次取出，保证分布均匀
+function nextType() {
+  if (bag.length === 0) {
+    bag = [0, 1, 2, 3, 4, 5, 6];
+    for (let i = 6; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+  }
+  return bag.pop();
+}
+
+// 生成新方块到顶部中央；若出生点已被堆叠占用则游戏结束
+function spawn() {
+  const t = nextT;
+  nextT = nextType();
+  const m = SHAPES[t].map(r => r.slice());       // 复制矩阵
+  cur = { m, t, x: Math.floor((COLS - m[0].length) / 2), y: 0 };
+  if (collide(cur.m, cur.x, cur.y)) state = 'over';
+}
+
+/* ==================== 碰撞检测 ==================== */
+// 判断矩阵 m 放在 (px, py) 时是否越界或与已堆叠方块重叠
+function collide(m, px, py) {
+  for (let y = 0; y < m.length; y++) {
+    for (let x = 0; x < m[y].length; x++) {
+      if (!m[y][x]) continue;
+      const bx = px + x, by = py + y;
+      if (bx < 0 || bx >= COLS || by >= ROWS) return true;  // 越过左右边界或触底
+      if (by >= 0 && board[by][bx]) return true;            // 与已堆叠方块碰撞
+    }
+  }
+  return false;
+}
+
+// 顺时针旋转矩阵（转置后翻转）
+function rotate(m) {
+  const r = [];
+  for (let x = 0; x < m[0].length; x++) {
+    r.push([]);
+    for (let y = m.length - 1; y >= 0; y--) r[x].push(m[y][x]);
+  }
+  return r;
+}
+
+/* ==================== 玩家操作 ==================== */
+function move(dx) {
+  if (!collide(cur.m, cur.x + dx, cur.y)) cur.x += dx;
+}
+
+// 旋转 + 简单踢墙：依次尝试原位、左移 1、右移 1、左移 2、右移 2
+function rotatePiece() {
+  const r = rotate(cur.m);
+  for (const off of [0, -1, 1, -2, 2]) {
+    if (!collide(r, cur.x + off, cur.y)) { cur.m = r; cur.x += off; return; }
+  }
+}
+
+// 软降：下移一格并得 1 分；到底则锁定
+function softDrop() {
+  if (!collide(cur.m, cur.x, cur.y + 1)) { cur.y++; score++; }
+  else lockPiece();
+}
+
+// 硬降：直接落到最低可行位置，每格得 2 分，随即锁定
+function hardDrop() {
+  let d = 0;
+  while (!collide(cur.m, cur.x, cur.y + 1)) { cur.y++; d++; }
+  score += d * 2;
+  lockPiece();
+}
+
+function togglePause() {
+  if (state === 'playing') state = 'paused';
+  else if (state === 'paused') state = 'playing';
+}
+
+/* ==================== 锁定与消行 ==================== */
+function lockPiece() {
+  let overflow = false;
+  cur.m.forEach((row, y) => row.forEach((v, x) => {
+    if (!v) return;
+    const by = cur.y + y;
+    if (by < 0) { overflow = true; return; }     // 锁定时仍超出顶部 → 游戏结束
+    board[by][cur.x + x] = cur.t + 1;            // 棋盘存"颜色索引 + 1"，0 表示空
+  }));
+  if (overflow) { state = 'over'; return; }
+  clearLines();
+  spawn();                                       // 无论是否消行都生成下一个方块
+}
+
+function clearLines() {
+  board = board.filter(row => row.some(v => !v));          // 移除所有满行
+  const cleared = ROWS - board.length;
+  while (board.length < ROWS) board.unshift(Array(COLS).fill(0));  // 顶部补空行
+  if (cleared) {
+    score += LINE_SCORES[cleared] * level;                 // 消行得分 × 当前等级
+    lines += cleared;
+    level = Math.floor(lines / 10) + 1;                    // 每消 10 行升 1 级
+  }
+}
+
+// 重力自然下落一格（不加分）；无法下移则锁定
+function gravityStep() {
+  if (!collide(cur.m, cur.x, cur.y + 1)) cur.y++;
+  else lockPiece();
+}
+
+// 等级越高，下落间隔越短（下限 80ms）
+function dropInterval() {
+  return Math.max(80, 800 * Math.pow(0.85, level - 1));
+}
+
+/* ==================== 初始化 / 重新开始 ==================== */
+function init() {
+  board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+  score = 0; lines = 0; level = 1;
+  bag = []; nextT = nextType();
+  state = 'playing';
+  spawn();
+}
+
+/* ==================== 键盘控制 ==================== */
+document.addEventListener('keydown', e => {
+  const k = e.key;
+  // 阻止方向键 / 空格触发页面滚动
+  if (['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', ' '].includes(k)) e.preventDefault();
+  if (k === 'p' || k === 'P') { togglePause(); return; }
+  if (k === 'r' || k === 'R') { init(); return; }
+  if (state === 'over' && (k === ' ' || k === 'Enter')) { init(); return; }
+  if (state !== 'playing') return;
+  // 旋转与硬降不响应按键长按连发
+  if ((k === 'ArrowUp' || k === ' ') && e.repeat) return;
+  switch (k) {
+    case 'ArrowLeft':  move(-1);       break;
+    case 'ArrowRight': move(1);        break;
+    case 'ArrowDown':  softDrop();     break;
+    case 'ArrowUp':    rotatePiece();  break;
+    case ' ':          hardDrop();     break;
+  }
+});
+document.getElementById('btn-restart').addEventListener('click', init);
+
+/* ==================== 绘制 ==================== */
+// 画一个带高光/阴影的方块格（px, py 为像素坐标）
+function drawCell(c, px, py, size, colorIdx) {
+  c.fillStyle = COLORS[colorIdx];
+  c.fillRect(px + 1, py + 1, size - 2, size - 2);
+  c.fillStyle = 'rgba(255,255,255,.18)';
+  c.fillRect(px + 1, py + 1, size - 2, 4);
+  c.fillStyle = 'rgba(0,0,0,.28)';
+  c.fillRect(px + 1, py + size - 5, size - 2, 4);
+}
+
+function drawGrid() {
+  ctx.strokeStyle = 'rgba(255,255,255,.06)';
+  for (let i = 1; i < COLS; i++) {
+    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, ROWS * CELL); ctx.stroke();
+  }
+  for (let i = 1; i < ROWS; i++) {
+    ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(COLS * CELL, i * CELL); ctx.stroke();
+  }
+}
+
+// 暂停 / 结束时的半透明遮罩提示
+function overlay(title, tip) {
+  ctx.fillStyle = 'rgba(0,0,0,.68)';
+  ctx.fillRect(0, 0, COLS * CELL, ROWS * CELL);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd166';
+  ctx.font = 'bold 30px "Microsoft YaHei", sans-serif';
+  ctx.fillText(title, COLS * CELL / 2, ROWS * CELL / 2 - 8);
+  ctx.fillStyle = '#c8c8d8';
+  ctx.font = '15px "Microsoft YaHei", sans-serif';
+  ctx.fillText(tip, COLS * CELL / 2, ROWS * CELL / 2 + 26);
+}
+
+// 在预览区按实际占用边界居中绘制下一个方块
+function drawNext() {
+  nctx.clearRect(0, 0, 100, 100);
+  const m = SHAPES[nextT];
+  const offX = (100 - m[0].length * NCELL) / 2;
+  const offY = (100 - m.length * NCELL) / 2;
+  m.forEach((row, y) => row.forEach((v, x) => {
+    if (v) drawCell(nctx, offX + x * NCELL, offY + y * NCELL, NCELL, nextT);
+  }));
+}
+
+function draw() {
+  ctx.fillStyle = '#0d0d1c';
+  ctx.fillRect(0, 0, COLS * CELL, ROWS * CELL);
+  drawGrid();
+  // 已锁定的方块
+  board.forEach((row, y) => row.forEach((v, x) => {
+    if (v) drawCell(ctx, x * CELL, y * CELL, CELL, v - 1);
+  }));
+  // 当前方块
+  cur.m.forEach((row, y) => row.forEach((v, x) => {
+    if (v && cur.y + y >= 0) drawCell(ctx, (cur.x + x) * CELL, (cur.y + y) * CELL, CELL, cur.t);
+  }));
+  if (state === 'paused') overlay('已暂停', '按 P 继续');
+  if (state === 'over')   overlay('游戏结束', '按 R 或空格重新开始');
+  drawNext();
+  // 更新侧边栏数字
+  document.getElementById('score').textContent = score;
+  document.getElementById('level').textContent = level;
+  document.getElementById('lines').textContent = lines;
+}
+
+/* ==================== 主循环 ==================== */
+// requestAnimationFrame 驱动渲染；按 dropInterval 累计时间触发重力下落
+function loop(time = 0) {
+  const delta = time - lastTime;
+  lastTime = time;
+  if (state === 'playing') {
+    dropCounter += delta;
+    if (dropCounter >= dropInterval()) { dropCounter = 0; gravityStep(); }
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
